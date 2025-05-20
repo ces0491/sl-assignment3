@@ -1,7 +1,7 @@
 ---
 title: "Medical Insurance Cost Classification"
-subtitle: "Supervised Learning - Assignment 2"
-author: "TBSCES001"
+subtitle: "Supervised Learning - Assignment 3"
+author: "Cesaire Tobias"
 date: "May 20, 2025"
 format: 
   pdf:
@@ -36,7 +36,11 @@ library(pROC)        # For ROC curves
 library(PRROC)       # For precision-recall curves
 library(ranger)      # Random Forest
 library(xgboost)     # For neural network approximation
-library(keras)       # For neural networks if available
+library(keras)       # For neural networks
+library(viridis)     # For better color palettes
+
+# Set seed for reproducibility
+my_seed <- 9104
 
 # Set default chunk options for the entire document
 knitr::opts_chunk$set(
@@ -48,6 +52,41 @@ knitr::opts_chunk$set(
   out.width = "80%", # Set figure width
   results = "asis"   # Output results as-is
 )
+
+# Custom theme for consistent plot styling
+my_theme <- theme_minimal() +
+  theme(
+    plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+    plot.subtitle = element_text(size = 12, hjust = 0.5, color = "gray40"),
+    axis.title = element_text(size = 12),
+    axis.text = element_text(size = 10),
+    legend.position = "bottom",
+    legend.title = element_blank(),
+    legend.text = element_text(size = 10),
+    panel.grid.minor = element_blank(),
+    panel.border = element_rect(fill = NA, color = "gray90"),
+    plot.margin = unit(c(1, 1, 1, 1), "cm") # Using base unit function
+  )
+
+# Custom color palettes
+charge_colors <- c("#5ab4ac", "#d8b365")  # For binary target
+model_colors <- viridis(4, option = "plasma")  # For model comparison
+```
+
+# Data Import and Preparation
+
+```{r load-data}
+# Base directory for data
+base_data_dir <- "./inst/extdata"
+
+# Load training data
+insurance_data <- read.csv(file.path(base_data_dir, "insurance_A2.csv"))
+
+# Load test data
+test_data <- read.csv(file.path(base_data_dir, "A2_testing.csv"))
+
+# Set seed for reproducibility
+set.seed(my_seed)
 ```
 
 # Introduction
@@ -62,68 +101,63 @@ The analysis addresses the following questions:
 
 The dataset includes information about US patients with the following features:
 
-- **age**: Integer, primary beneficiary's age
-- **sex**: Factor, gender of insurance contractor (female/male)
-- **bmi**: Continuous, body mass index
-- **children**: Integer, number of dependents
-- **smoker**: Factor, smoking status (yes/no)
-- **region**: Factor, US residential area (northeast, southeast, southwest, northwest)
+- **age**: `Integer` - primary beneficiary's age
+- **sex**: `Factor` - gender of insurance contractor (female/male)
+- **bmi**: `Continuous` - body mass index
+- **children**: `Integer` - number of dependents
+- **smoker**: `Factor` - smoking status (yes/no)
+- **region**: `Factor` - US residential area (northeast, southeast, southwest, northwest)
 
-The target variable will be derived from **charges** (medical costs billed), which we'll convert to a binary outcome (high/low) for classification.
+The target variable **charges** (medical costs billed) has been transformed (external to this analysis) from a continuous dollar amount to binary ("high"/"low").
 
-# Data Import and Preparation
-
-```{r load-data}
-# Base directory for data
-base_data_dir <- "./inst/extdata"
-my_seed <- 756
-
-# Load training data
-insurance_data <- read.csv(file.path(base_data_dir, "insurance_A2.csv"))
-
-# Load test data
-test_data <- read.csv(file.path(base_data_dir, "A2_testing.csv"))
-
-# Set seed for reproducibility
-set.seed(my_seed)
-```
-
-```{r convert-factors}
+```{r data-preparation}
 # Check for missing values in both datasets
 train_missing <- sum(is.na(insurance_data))
 test_missing <- sum(is.na(test_data))
 
-# Convert character columns to factors
+# Convert appropriate columns to factors
 insurance_data <- insurance_data %>%
   mutate(
     sex = as.factor(sex),
     smoker = as.factor(smoker),
     region = as.factor(region),
+    charges = as.factor(charges),
     children = as.integer(children)
   )
 
-test_data <- test_data %>%
-  mutate(
-    sex = as.factor(sex),
-    smoker = as.factor(smoker),
-    region = as.factor(region),
-    children = as.integer(children)
-  )
+# Explicitly set reference levels for consistent encoding
+insurance_data$charges <- relevel(insurance_data$charges, ref = "low")
+insurance_data$sex <- relevel(insurance_data$sex, ref = "female")
+insurance_data$smoker <- relevel(insurance_data$smoker, ref = "no")
+insurance_data$region <- relevel(insurance_data$region, ref = "northeast")
 
-# Create a binary target variable based on charges
-# Using median as the threshold for simplicity
-median_charge <- median(insurance_data$charges)
-insurance_data$charges_class <- factor(ifelse(insurance_data$charges > median_charge, "high", "low"),
-                                      levels = c("low", "high"))
+# Split data into training and testing sets
+set.seed(my_seed)
+train_index <- createDataPartition(insurance_data$charges, p = 0.8, list = FALSE)
+train_data <- insurance_data[train_index, ]
+test_data <- insurance_data[-train_index, ]
+
+# Verify encoding consistency in split data
+stopifnot(
+  all(levels(train_data$charges) == levels(insurance_data$charges)),
+  all(levels(test_data$charges) == levels(insurance_data$charges))
+)
+
+# Store class distribution for consistent referencing
+training_charges_dist <- table(train_data$charges)
+training_charges_percent <- prop.table(training_charges_dist) * 100
+
 ```
 
 The data consists of `r nrow(insurance_data)` training observations and `r nrow(test_data)` test observations. There are `r train_missing` missing values in the training data and `r test_missing` missing values in the test data, indicating complete datasets.
 
-For the classification task, we've converted the continuous "charges" variable into a binary outcome:
-- "high" = charges above the median (`r scales::dollar(median_charge)`)
-- "low" = charges below or equal to the median
+The model development approach comprises three phases:
 
-This transformation allows us to apply classification algorithms to predict whether a patient will have high or low insurance costs.
+1. **Training Phase**: The `insurance_A2.csv` dataset is split into training (80%) and internal validation (20%) sets.
+2. **Model Selection Phase**: Models are evaluated on the internal validation set with emphasis on the F1 score.
+3. **External Validation Phase**: The best model is then applied to a separate dataset (`A2_testing.csv`).
+
+This approach minimizes over-fitting risk and provides a more robust assessment of model generalizability.
 
 # Exploratory Data Analysis
 
@@ -135,7 +169,7 @@ A sample of the dataset is shown below:
 # Display top 5 rows of data
 top_n_sample <- insurance_data %>%
   dplyr::top_n(5) %>%
-  dplyr::mutate(dplyr::across(c(age, bmi, children, charges), ~round(.x, 2)))
+  dplyr::mutate(dplyr::across(c(age, bmi, children), ~round(.x, 2)))
 
 # Create formatted table
 kableExtra::kbl(
@@ -182,7 +216,7 @@ kableExtra::kbl(
 ```{r summary-stats}
 # Calculate summary statistics for numerical variables
 summ_stats <- insurance_data %>%
-  dplyr::select(age, bmi, children, charges) %>%
+  dplyr::select(age, bmi, children) %>%
   dplyr::summarise(
     dplyr::across(
       .cols = dplyr::everything(),
@@ -209,8 +243,7 @@ summ_stats <- insurance_data %>%
       Variable,
       "age" = "Age",
       "bmi" = "BMI",
-      "children" = "Children",
-      "charges" = "Charges"
+      "children" = "Children"
     )
   )
 
@@ -236,7 +269,7 @@ kableExtra::kbl(
 sex_table <- table(insurance_data$sex)
 smoker_table <- table(insurance_data$smoker)
 region_table <- table(insurance_data$region)
-class_table <- table(insurance_data$charges_class)
+class_table <- table(insurance_data$charges)
 
 cat_summary <- data.frame(
   Variable = c(
@@ -300,12 +333,22 @@ p3 <- ggplot2::ggplot(insurance_data, ggplot2::aes(x = as.factor(children))) +
   ggplot2::labs(x = "Number of Children", y = "Frequency") +
   ggplot2::ggtitle("Children Distribution")
 
-p4 <- ggplot2::ggplot(insurance_data, ggplot2::aes(x = charges)) +
-  ggplot2::geom_histogram(bins = 30, fill = "steelblue", color = "white") +
-  ggplot2::theme_minimal() +
-  ggplot2::labs(x = "Charges ($)", y = "Frequency") +
-  ggplot2::scale_x_continuous(labels = scales::comma) +
-  ggplot2::ggtitle("Charges Distribution")
+p4 <- ggplot(data.frame(charges = insurance_data$charges), 
+       aes(x = charges, fill = charges)) +
+  geom_bar(width = 0.6, color = "white") +
+  geom_text(stat = "count", 
+            aes(label = paste0(round(..count../sum(..count..)*100, 1), "%")), 
+            vjust = 1.5,
+            color = "white",
+            size = 5) +
+  labs(title = "Distribution of Target Variable (Charges)",
+       x = "Charge Category",
+       y = "Count") +
+  scale_fill_manual(values = charge_colors) +
+  my_theme +
+  theme(axis.text = element_text(size = 12),
+        plot.margin = unit(c(1, 1, 1, 1), "cm")) +  # Increase margins
+  coord_cartesian(clip = "off")  # Prevent clipping of elements
 
 gridExtra::grid.arrange(p1, p2, p3, p4, ncol = 2)
 ```
@@ -323,7 +366,17 @@ The highly skewed nature of the charges distribution justifies our binary classi
 
 ```{r correlation-matrix, fig.cap="Correlation Matrix of Numerical Variables", fig.width=5, fig.height=5}
 # Create correlation matrix
-correlation_matrix <- cor(insurance_data[, c("age", "bmi", "children", "charges")])
+# Convert target to numeric for correlation
+insurance_numeric <- insurance_data
+# Ensure consistent encoding - "high" = 1, "low" = 0
+insurance_numeric$charges_numeric <- ifelse(insurance_data$charges == "high", 1, 0)
+insurance_numeric$smoker_numeric <- ifelse(insurance_data$smoker == "yes", 1, 0)
+insurance_numeric$sex_numeric <- ifelse(insurance_data$sex == "male", 1, 0)
+
+# Create correlation matrix
+corr_vars <- c("age", "bmi", "children", "smoker_numeric", "sex_numeric", "charges_numeric")
+correlation_matrix <- cor(insurance_numeric[, corr_vars])
+
 corrplot::corrplot(
   correlation_matrix,
   method = "circle",
@@ -331,7 +384,7 @@ corrplot::corrplot(
   tl.col = "black",
   tl.srt = 45,
   addCoef.col = "black",
-  col = colorRampPalette(c("#6D9EC1", "white", "#E46726"))(200),
+  col = colorRampPalette(charge_colors)(200),
   mar = c(0, 0, 2, 0),
   title = "Correlation Matrix of Numerical Variables"
 )
@@ -339,7 +392,7 @@ corrplot::corrplot(
 
 ```{r feature-target-relationships, fig.cap="Relationships Between Features and Target Class", fig.width=8, fig.height=6}
 # Create visualizations to explore relationship between features and target class
-p1 <- ggplot2::ggplot(insurance_data, ggplot2::aes(x = charges_class, y = age, fill = charges_class)) +
+p1 <- ggplot2::ggplot(insurance_data, ggplot2::aes(x = charges, y = age, fill = charges)) +
   ggplot2::geom_boxplot() +
   ggplot2::theme_minimal() +
   ggplot2::labs(x = "Charges Class", y = "Age") +
@@ -347,7 +400,7 @@ p1 <- ggplot2::ggplot(insurance_data, ggplot2::aes(x = charges_class, y = age, f
   ggplot2::theme(legend.position = "none") +
   ggplot2::ggtitle("Age by Charges Class")
 
-p2 <- ggplot2::ggplot(insurance_data, ggplot2::aes(x = charges_class, y = bmi, fill = charges_class)) +
+p2 <- ggplot2::ggplot(insurance_data, ggplot2::aes(x = charges, y = bmi, fill = charges)) +
   ggplot2::geom_boxplot() +
   ggplot2::theme_minimal() +
   ggplot2::labs(x = "Charges Class", y = "BMI") +
@@ -355,14 +408,14 @@ p2 <- ggplot2::ggplot(insurance_data, ggplot2::aes(x = charges_class, y = bmi, f
   ggplot2::theme(legend.position = "none") +
   ggplot2::ggtitle("BMI by Charges Class")
 
-p3 <- ggplot2::ggplot(insurance_data, ggplot2::aes(x = charges_class, fill = smoker)) +
+p3 <- ggplot2::ggplot(insurance_data, ggplot2::aes(x = charges, fill = smoker)) +
   ggplot2::geom_bar(position = "fill") +
   ggplot2::theme_minimal() +
   ggplot2::labs(x = "Charges Class", y = "Proportion") +
   ggplot2::scale_fill_brewer(palette = "Set2") +
   ggplot2::ggtitle("Smoking Status by Charges Class")
 
-p4 <- ggplot2::ggplot(insurance_data, ggplot2::aes(x = charges_class, fill = sex)) +
+p4 <- ggplot2::ggplot(insurance_data, ggplot2::aes(x = charges, fill = sex)) +
   ggplot2::geom_bar(position = "fill") +
   ggplot2::theme_minimal() +
   ggplot2::labs(x = "Charges Class", y = "Proportion") +
@@ -381,7 +434,7 @@ Key observations from the relationship plots:
 
 ```{r smoker-bmi-interaction, fig.cap="Interaction Between Smoking Status and BMI", fig.width=6, fig.height=4}
 # Explore the interaction between smoking and BMI
-ggplot2::ggplot(insurance_data, ggplot2::aes(x = bmi, y = charges, color = smoker, shape = charges_class)) +
+ggplot2::ggplot(insurance_data, ggplot2::aes(x = bmi, y = charges, color = smoker, shape = charges)) +
   ggplot2::geom_point(alpha = 0.7) +
   ggplot2::geom_smooth(method = "lm", se = FALSE) +
   ggplot2::theme_minimal() +
@@ -415,14 +468,10 @@ These insights will guide our modeling approach, particularly the need to captur
 Before building our models, we need to prepare the data appropriately.
 
 ```{r preprocessing}
-# Prepare data for modeling
-# Remove original charges column from training set
-model_data <- insurance_data %>%
-  dplyr::select(-charges)
 
 # Split data into features and target
-X <- model_data %>% dplyr::select(-charges_class)
-y <- model_data$charges_class
+X <- model_data %>% dplyr::select(-charges)
+y <- model_data$charges
 
 # Create train-test split
 set.seed(my_seed)
@@ -433,7 +482,7 @@ y_train <- y[train_index]
 y_valid <- y[-train_index]
 
 # Create a training data frame with the target
-train_data <- cbind(X_train, charges_class = y_train)
+train_data <- cbind(X_train, charges = y_train)
 
 # Create preprocessing recipe for consistent preprocessing
 preprocess_recipe <- caret::preProcess(
