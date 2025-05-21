@@ -75,8 +75,6 @@ charge_colors <- c("#5ab4ac", "#d8b365")  # For binary target
 model_colors <- viridis::viridis(4, option = "plasma")  # For model comparison
 ```
 
-# Data Import and Preparation {#sec-data-preparation}
-
 ```{r load-data}
 base_data_dir <- "./inst/extdata"
 github_repo <- "https://github.com/ces0491/sl-assignment3.git"
@@ -120,6 +118,29 @@ test_data <- read.csv(file.path(base_data_dir, "A2_testing.csv"))
 set.seed(my_seed)
 ```
 
+# Introduction {#sec-introduction}
+
+This report applies supervised machine learning classification techniques to predict whether medical insurance costs will be high or low based on patient characteristics. Two models are developed for this analysis - Support Vector Machine (SVM) and Neural Network.
+
+Key questions addressed:
+
+- **Patients**: Which personal factors significantly increase the likelihood of high insurance charges?
+- **Insurers**: How effectively can machine learning models classify high vs. low insurance costs?
+- **Policymakers**: Which factors should be targeted to reduce high-cost insurance claims?
+
+Dataset features include:
+
+- **age**: `Integer` - primary beneficiary's age
+- **sex**: `Factor` - gender (female/male)
+- **bmi**: `Continuous` - Body Mass Index
+- **children**: `Integer` - number of dependents
+- **smoker**: `Factor` - smoking status (yes/no)
+- **region**: `Factor` - US residential area (northeast, southeast, southwest, northwest)
+
+The target variable **charges** has been transformed (external to this analysis) from a continuous dollar amount to binary ("high"/"low").
+
+# Data Import and Preparation {#sec-data-preparation}
+
 ```{r data-preparation}
 # Check for missing values in both datasets
 train_missing <- sum(is.na(insurance_data))
@@ -142,27 +163,6 @@ insurance_data$smoker <- relevel(insurance_data$smoker, ref = "no")
 insurance_data$region <- relevel(insurance_data$region, ref = "northeast")
 
 ```
-
-# Introduction {#sec-introduction}
-
-This report applies supervised machine learning classification techniques to predict whether medical insurance costs will be high or low based on patient characteristics. Two models are developed for this analysis - Support Vector Machine (SVM) and Neural Network.
-
-Key questions addressed:
-
-- **Patients**: Which personal factors significantly increase the likelihood of high insurance charges?
-- **Insurers**: How effectively can machine learning models classify high vs. low insurance costs?
-- **Policymakers**: Which factors should be targeted to reduce high-cost insurance claims?
-
-Dataset features include:
-
-- **age**: `Integer` - primary beneficiary's age
-- **sex**: `Factor` - gender (female/male)
-- **bmi**: `Continuous` - Body Mass Index
-- **children**: `Integer` - number of dependents
-- **smoker**: `Factor` - smoking status (yes/no)
-- **region**: `Factor` - US residential area (northeast, southeast, southwest, northwest)
-
-The target variable **charges** has been transformed (external to this analysis) from a continuous dollar amount to binary ("high"/"low").
 
 ## Data Sources {#sec-data-sources}
 
