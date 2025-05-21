@@ -32,13 +32,11 @@ library(scales)      # For formatting plot scales
 library(corrplot)    # For correlation visualization
 library(caret)       # For model training and evaluation
 library(e1071)       # For SVM
+library(nnet)        # For neural nets
 library(pROC)        # For ROC curves
 library(PRROC)       # For precision-recall curves
 library(viridis)     # For better color palettes
-library(DiagrammeR)  # For network visualization
-library(reticulate)  # For Python integration
-
-use_python("C:/Users/cesai_b8mratk/AppData/Local/Programs/Python/Python311/python.exe", required = TRUE)
+library(NeuralNetTools)  # For network visualization
 
 # Set seed for reproducibility
 my_seed <- 9104
@@ -50,8 +48,8 @@ knitr::opts_chunk$set(
   message = FALSE,     # Suppress messages
   fig.align = "center",  # Center figures
   fig.pos = "H",       # Position figures exactly here
-  fig.width = 8,       # Set wider default figure width
-  fig.height = 6,      # Set taller default figure height
+  fig.width = 6.5,     # Set default figure width (adjusted to prevent overflow)
+  fig.height = 4.5,    # Set default figure height (adjusted to prevent overflow)
   out.width = "95%",   # Set output figure width
   dpi = 300,           # Higher resolution
   results = "asis"     # Output results as-is
@@ -80,11 +78,40 @@ model_colors <- viridis::viridis(4, option = "plasma")  # For model comparison
 # Data Import and Preparation {#sec-data-preparation}
 
 ```{r load-data}
-# Base directory for data
 base_data_dir <- "./inst/extdata"
+github_repo <- "https://github.com/ces0491/sl-assignment3.git"
+github_data_url <- "https://github.com/ces0491/sl-assignment2/raw/refs/heads/main/data/insurance_data_A2.RData"
 
 # Load training data
-insurance_data <- read.csv(file.path(base_data_dir, "insurance_A2.csv"))
+# Try to read the data from local files first
+if (file.exists(file.path(base_data_dir, "insurance_A2.csv"))) {
+  insurance_data <- read.csv(file.path(base_data_dir, "insurance_A2.csv"))
+} else {
+  # If local file doesn't exist, try to download from GitHub
+  tryCatch({
+    temp_file <- tempfile(fileext = ".RData")
+    download.file(github_data_url, temp_file, mode = "wb")
+    load(temp_file)
+    # Assuming the RData file contains insurance_data object
+    if (!exists("insurance_A2")) {
+      stop("RData file doesn't contain insurance_data object")
+    }
+    unlink(temp_file)  # Clean up
+    
+    # Save the data locally for future runs
+    if (!dir.exists(base_data_dir)) {
+      dir.create(base_data_dir, recursive = TRUE)
+    }
+    write.csv(insurance_data, file.path(base_data_dir, "insurance_A2.csv"), row.names = FALSE)
+  }, error = function(e) {
+    stop("Error loading insurance data: ", e$message)
+  })
+}
+
+# Initial inspection to verify data loaded correctly
+if (nrow(insurance_data) == 0 || !("charges" %in% colnames(insurance_data))) {
+  stop("Error loading insurance data")
+}
 
 # Load test data
 test_data <- read.csv(file.path(base_data_dir, "A2_testing.csv"))
@@ -114,32 +141,11 @@ insurance_data$sex <- relevel(insurance_data$sex, ref = "female")
 insurance_data$smoker <- relevel(insurance_data$smoker, ref = "no")
 insurance_data$region <- relevel(insurance_data$region, ref = "northeast")
 
-# Split data into training and validation sets
-set.seed(my_seed)
-train_index <- caret::createDataPartition(insurance_data$charges, p = 0.8, list = FALSE)
-train_data <- insurance_data[train_index, ]
-valid_data <- insurance_data[-train_index, ]
-
-# Create feature matrices and target vectors
-X_train <- train_data %>% dplyr::select(-charges)
-y_train <- train_data$charges
-X_valid <- valid_data %>% dplyr::select(-charges)
-y_valid <- valid_data$charges
-
-# Verify encoding consistency in split data
-stopifnot(
-  all(levels(train_data$charges) == levels(insurance_data$charges)),
-  all(levels(valid_data$charges) == levels(insurance_data$charges))
-)
-
-# Store class distribution for consistent referencing
-training_charges_dist <- table(train_data$charges)
-training_charges_percent <- prop.table(training_charges_dist) * 100
 ```
 
 # Introduction {#sec-introduction}
 
-This report applies machine learning classification techniques to predict whether medical insurance costs will be high or low based on patient characteristics. We build and compare two advanced models - Support Vector Machine (SVM) and Neural Network - to effectively classify insurance costs, which helps stakeholders better understand risk factors and make informed decisions.
+This report applies supervised machine learning classification techniques to predict whether medical insurance costs will be high or low based on patient characteristics. Two models are developed for this analysis - Support Vector Machine (SVM) and Neural Network.
 
 Key questions addressed:
 
@@ -158,6 +164,13 @@ Dataset features include:
 
 The target variable **charges** has been transformed (external to this analysis) from a continuous dollar amount to binary ("high"/"low").
 
+## Data Sources {#sec-data-sources}
+
+The data can be accessed from:
+
+- **GitHub Repository**: [sl-assignment3](https://github.com/ces0491/sl-assignment3.git)
+- **Direct RData Link**: [insurance_data_A2.RData](https://github.com/ces0491/sl-assignment3/raw/refs/heads/main/data/insurance_data_A2.RData)
+
 The dataset consists of `r nrow(insurance_data)` observations with `r train_missing` missing values in the training data and `r test_missing` missing values in the test data, indicating complete datasets.
 
 ## Methodology Overview {#sec-methodology}
@@ -168,8 +181,6 @@ The model development approach comprises three phases:
 2. **Model Selection Phase**: Models are evaluated on the internal validation set with emphasis on the F1 score.
 3. **External Validation Phase**: The best model is then applied to a separate dataset (`A2_testing.csv`).
 
-This approach minimizes over-fitting risk and provides a more robust assessment of model generalizability.
-
 # Exploratory Data Analysis {#sec-exploratory-data-analysis}
 
 ## Data Structure and Target Distribution {#sec-target-distribution}
@@ -178,49 +189,9 @@ This approach minimizes over-fitting risk and provides a more robust assessment 
 # Calculate the distribution of the target variable
 charges_distribution <- table(insurance_data$charges)
 charges_percent <- prop.table(charges_distribution) * 100
-
-# Create bar plot
-ggplot2::ggplot(data.frame(charges = insurance_data$charges), 
-       ggplot2::aes(x = charges, fill = charges)) +
-  ggplot2::geom_bar(width = 0.6, color = "white") +
-  ggplot2::geom_text(stat = "count", 
-            ggplot2::aes(label = paste0(round(..count../sum(..count..)*100, 1), "%")), 
-            vjust = 1.5,
-            color = "white",
-            size = 5) +
-  ggplot2::labs(title = "Distribution of Target Variable (Charges)",
-       x = "Charge Category",
-       y = "Count") +
-  ggplot2::scale_fill_manual(values = charge_colors) +
-  my_theme +
-  theme(axis.text = element_text(size = 12),
-        plot.margin = unit(c(1, 1, 1, 1), "cm")) +  
-  ggplot2::coord_cartesian(clip = "off")  
 ```
 
 The target variable shows class distribution with `r round(charges_percent["low"], 1)`% "low" and `r round(charges_percent["high"], 1)`% "high" charges. This relatively balanced distribution means that standard evaluation metrics like accuracy are appropriate, though we will still prioritize the F1 score as it balances precision and recall.
-
-```{r show-data-sample}
-# Display sample of the dataset
-top_n_sample <- insurance_data %>%
-  dplyr::sample_n(5) %>%
-  dplyr::mutate(dplyr::across(c(age, bmi, children), ~round(.x, 2)))
-
-# Create formatted table
-kableExtra::kbl(
-  top_n_sample,
-  caption = "Insurance Dataset Sample (5 Rows)",
-  format = "latex",
-  booktabs = TRUE,
-  align = "c",
-  digits = 2
-) %>%
-  kableExtra::kable_styling(
-    latex_options = c("HOLD_position", "scale_down"),
-    font_size = 9,
-    position = "center"
-  )
-```
 
 ## Variable Distributions and Relationships {#sec-variable-distributions}
 
@@ -290,8 +261,6 @@ p4 <- ggplot2::ggplot(insurance_data, ggplot2::aes(x = smoker, fill = charges)) 
 gridExtra::grid.arrange(p1, p2, p3, p4, ncol = 2)
 ```
 
-The numerical variables show interesting distributions:
-
 - **Age**: Fairly uniform across the adult age range (18-65)
 - **BMI**: Centered around 25-35, with most values in the overweight to obese range
 - **Children**: Highly skewed, with most individuals having 0-2 children
@@ -309,26 +278,12 @@ insurance_numeric$sex_numeric <- ifelse(insurance_data$sex == "male", 1, 0)
 corr_vars <- c("age", "bmi", "children", "smoker_numeric", "sex_numeric", "charges_numeric")
 correlation_matrix <- cor(insurance_numeric[, corr_vars])
 
-# Correlation plot
-corrplot::corrplot(correlation_matrix, 
-         method = "circle", 
-         type = "upper", 
-         order = "hclust",
-         tl.col = "black", 
-         tl.srt = 45, 
-         addCoef.col = "black",
-         col = colorRampPalette(charge_colors)(200),
-         diag = FALSE,
-         title = "Correlation Matrix of Variables",
-         mar = c(0, 0, 2, 0),
-         number.cex = 0.9,
-         tl.cex = 0.9)
 ```
 
-**Correlation analysis confirms:**
+**Correlation analysis indicates:**
 
-- **Smoking status** has the strongest correlation with high charges (`r round(correlation_matrix["smoker_numeric", "charges_numeric"], 2)`)
-- **Age** has the second strongest correlation with high charges (`r round(correlation_matrix["age", "charges_numeric"], 2)`)
+- **Age** has the strongest correlation with high charges (`r round(correlation_matrix["age", "charges_numeric"], 2)`)
+- **Smoking status** has the second strongest correlation with high charges (`r round(correlation_matrix["smoker_numeric", "charges_numeric"], 2)`)
 - **BMI** shows moderate positive correlation (`r round(correlation_matrix["bmi", "charges_numeric"], 2)`)
 - **Children** and **Sex** show weaker correlations
 
@@ -367,8 +322,6 @@ p4 <- ggplot2::ggplot(insurance_data, ggplot2::aes(x = charges, fill = sex)) +
 gridExtra::grid.arrange(p1, p2, p3, p4, ncol = 2)
 ```
 
-Key observations from the relationship plots:
-
 - **Age**: Individuals with high charges tend to be older (median age `r round(median(insurance_data$age[insurance_data$charges == "high"]), 1)` vs. `r round(median(insurance_data$age[insurance_data$charges == "low"]), 1)` for low charges)
 - **BMI**: Higher BMI is associated with high charges (median BMI `r round(median(insurance_data$bmi[insurance_data$charges == "high"]), 1)` vs. `r round(median(insurance_data$bmi[insurance_data$charges == "low"]), 1)` for low charges)
 - **Region**: Modest variations in charges across regions
@@ -386,36 +339,61 @@ ggplot2::ggplot(insurance_data, ggplot2::aes(x = bmi, y = as.numeric(charges == 
     y = "Probability of High Charges", 
     color = "Smoker"
   ) +
-  ggplot2::scale_color_manual(values = c("#56B4E9", "#E69F00")) +
+  ggplot2::scale_color_manual(values = c(charge_colors[1], charge_colors[2])) +
   ggplot2::scale_y_continuous(breaks = c(0, 1), labels = c("Low", "High")) +
   ggplot2::ggtitle("BMI vs. Charges by Smoking Status") +
   my_theme
 ```
 
-This plot reveals a crucial interaction: BMI has a much stronger effect on charges for smokers than for non-smokers. The relationship between BMI and high charges is significantly steeper for smokers, suggesting that the combination of smoking and high BMI substantially increases the likelihood of high insurance charges.
+This plot reveals that BMI has a stronger effect on charges for non-smokers than for smokers. While non-smokers have a higher probability of high charges as BMI increases, smokers have a high probability of high charges regardless of BMI.
 
 ## Key Findings from EDA {#sec-key-findings}
 
-1. **Target Distribution**: The dataset has `r round(charges_percent["high"], 1)`% "high" and `r round(charges_percent["low"], 1)`% "low" charge cases, which is reasonably balanced.
+1. **Target Distribution**: Reasonably balanced (`r round(charges_percent["high"], 1)`% "high" and `r round(charges_percent["low"], 1)`% "low").
 
 2. **Important Predictors**:
    - **Smoking**: The strongest predictor of high charges with `r round(smoker_high_pct, 1)`% of smokers having high charges
    - **Age**: Older individuals tend to have higher charges
-   - **BMI**: Higher BMI is associated with higher charges
-   - **Interaction Effects**: The impact of BMI is much stronger for smokers
+   - **BMI**: Higher BMI is associated with higher charges (for non-smokers)
 
 3. **Data Quality**:
    - No missing values
    - Some outliers present, particularly in BMI
-   - Complex interactions between predictors suggest non-linear modeling approaches
+   - Interactions between predictors suggest non-linear modeling approaches
 
 These insights will guide our modeling approach, particularly the need to capture interactions between features. Support Vector Machines with non-linear kernels and Neural Networks are well-suited for capturing these complex patterns.
 
 # Data Preprocessing {#sec-preprocessing}
 
-To prepare the data for our machine learning models, we apply appropriate preprocessing steps:
+1. **Data Splitting**: 80% training, 20% validation
+2. **Feature Scaling**: Standardizing numerical features (mean = 0, sd = 1)
+3. **Categorical Encoding**: Converting categorical variables to dummy variables for neural network compatibility
+4. **Target Encoding**: Converting "high"/"low" targets to 1/0 for neural network compatibility
 
 ```{r preprocessing}
+# Split data into training and validation sets
+set.seed(my_seed)
+
+train_index <- caret::createDataPartition(insurance_data$charges, p = 0.8, list = FALSE)
+train_data <- insurance_data[train_index, ]
+valid_data <- insurance_data[-train_index, ]
+
+# Create feature matrices and target vectors
+X_train <- train_data %>% dplyr::select(-charges)
+y_train <- train_data$charges
+X_valid <- valid_data %>% dplyr::select(-charges)
+y_valid <- valid_data$charges
+
+# Verify encoding consistency in split data
+stopifnot(
+  all(levels(train_data$charges) == levels(insurance_data$charges)),
+  all(levels(valid_data$charges) == levels(insurance_data$charges))
+)
+
+# Store class distribution for consistent referencing
+training_charges_dist <- table(train_data$charges)
+training_charges_percent <- prop.table(training_charges_dist) * 100
+
 # Create preprocessing recipe for consistent preprocessing
 preprocess_recipe <- caret::preProcess(
   X_train,
@@ -446,13 +424,6 @@ y_train_numeric <- as.numeric(y_train == "high")
 y_valid_numeric <- as.numeric(y_valid == "high")
 ```
 
-The preprocessing steps include:
-
-1. **Data Splitting**: 80% training, 20% validation
-2. **Feature Scaling**: Standardizing numerical features (mean = 0, sd = 1)
-3. **Categorical Encoding**: Converting categorical variables to dummy variables for neural network compatibility
-4. **Target Encoding**: Converting "high"/"low" targets to 1/0 for neural network compatibility
-
 After preprocessing, we have `r nrow(X_train_scaled)` training samples and `r nrow(X_valid_scaled)` validation samples, with `r ncol(X_train_matrix)` features after one-hot encoding.
 
 # Modeling {#sec-modeling}
@@ -466,9 +437,6 @@ Support Vector Machines are well-suited for this classification task due to thei
 3. The decision boundary between classes is complex
 
 ```{r svm-implementation}
-# Load required library
-library(e1071)
-
 # Set seed for reproducibility
 set.seed(my_seed)
 
@@ -496,12 +464,11 @@ tune_results <- data.frame(
   stringsAsFactors = FALSE
 )
 
-# Use try-catch for each parameter combination
 for (gamma_val in gamma_values) {
   for (cost_val in cost_values) {
-    # Use try-catch to handle potential errors
+    # Use try-catch for each parameter combination to handle potential errors
     result <- try({
-      # Train model with current parameters
+      # Train model with current parameters passed in loop
       temp_model <- svm(
         formula = charges ~ .,
         data = train_df,
@@ -528,19 +495,12 @@ for (gamma_val in gamma_values) {
         f1 = temp_cm$byClass["F1"],
         ROC = (temp_cm$byClass["Sensitivity"] + temp_cm$byClass["Specificity"]) / 2
       )
-      
-      # Return row
       new_row
     }, silent = TRUE)
     
     # If successful, add to results
     if (!inherits(result, "try-error")) {
       tune_results <- rbind(tune_results, result)
-      
-      # Print progress (for debugging)
-      cat("Completed gamma =", gamma_val, ", cost =", cost_val, "\n")
-    } else {
-      cat("Error with gamma =", gamma_val, ", cost =", cost_val, "\n")
     }
   }
 }
@@ -552,10 +512,6 @@ if (nrow(tune_results) > 0) {
   # Store best parameters for later use
   best_gamma <- best_params$gamma
   best_cost <- best_params$cost
-  
-  # Display best parameters
-  print("Best parameters:")
-  print(best_params)
   
   # Train final model with best parameters
   final_svm_model <- svm(
@@ -580,45 +536,37 @@ if (nrow(tune_results) > 0) {
     specificity = cm$byClass["Specificity"],
     f1 = cm$byClass["F1"]
   )
-  print(cm)
-} else {
-  # If grid search fails, use default model
-  cat("Grid search failed. Using default parameters.\n")
-  best_gamma <- 0.1
-  best_cost <- 10
-  
-  svm_model <- svm(
-    formula = charges ~ .,
-    data = train_df,
-    kernel = "radial",
-    gamma = best_gamma,
-    cost = best_cost,
-    probability = TRUE
-  )
-  
-  # Make predictions
-  svm_pred <- predict(svm_model, X_valid_scaled)
-  svm_probs <- predict(svm_model, X_valid_scaled, probability = TRUE)
-  svm_pred_prob <- attr(svm_probs, "probabilities")[, "high"]
-  
-  # Calculate performance metrics
-  cm <- confusionMatrix(svm_pred, y_valid, positive = "high")
-  svm_results <- data.frame(
-    accuracy = cm$overall["Accuracy"],
-    sensitivity = cm$byClass["Sensitivity"],
-    specificity = cm$byClass["Specificity"],
-    f1 = cm$byClass["F1"]
-  )
-  print(cm)
 }
+```
+
+```{r svm-tune-results-table}
+# Create a formatted table for SVM tuning results
+tune_results_table <- tune_results %>%
+  arrange(desc(f1)) %>%
+  mutate(across(where(is.numeric), ~round(., 3))) %>% 
+  top_n(5)
+
+kableExtra::kbl(
+  tune_results_table,
+  caption = "SVM Hyperparameter Tuning Results",
+  format = "latex",
+  booktabs = TRUE,
+  align = "c"
+) %>%
+  kableExtra::kable_styling(
+    latex_options = c("HOLD_position", "scale_down"),
+    font_size = 9,
+    position = "center"
+  ) %>%
+  kableExtra::row_spec(1, bold = TRUE, background = "#E8F4F9")
 ```
 
 ### SVM Model Specification and Justification {#sec-svm-justification}
 
-Based on our tuning results, we selected an SVM model with the following parameters:
+Based on our EDA and tuning results, we selected an SVM model with the following parameters:
 
 - **Kernel**: Radial Basis Function (RBF)
-  - **Justification**: The RBF kernel can capture complex non-linear decision boundaries, which is appropriate given the interactions we observed between features (e.g., BMI and smoking status).
+  - **Justification**: The RBF kernel can capture complex non-linear decision boundaries, which is appropriate given the interactions we observed between features (e.g., BMI and smoking status) as found in the EDA.
 
 - **Cost = `r best_cost`**
   - **Justification**: This regularization parameter balances between maximizing the margin and minimizing classification error. Our tuning results show that C = `r best_cost` provides the best trade-off. A higher C value means we prioritize correctly classifying training points over having a wider margin.
@@ -630,58 +578,12 @@ The best configuration achieved an accuracy of `r round(svm_results$accuracy[1],
 
 ## Neural Network {#sec-nn}
 
-Neural networks can learn complex patterns and non-linear relationships, making them suitable for our insurance cost classification task. We'll implement a feedforward neural network using the `nnet` package, which provides a more stable implementation for R.
+Neural networks can learn complex patterns and non-linear relationships, making them suitable for our insurance cost classification task. We'll implement a feedforward neural network using the `nnet` package, which provides a more stable implementation for R than keras which requires Python libraries.
 
 ### Neural Network Architecture Design {#sec-nn-design}
 
-```{r nn-design, fig.cap="Neural Network Architecture", fig.height=4, fig.width=8, out.width=800}
-# Create a visual representation of the neural network architecture
-grViz("
-digraph neural_network {
-  rankdir=LR;
-  splines=line;
-  node [fixedsize=true, label=''];
-  
-  subgraph cluster_input {
-    color=none;
-    node [style=solid,color=black,shape=circle];
-    x1 [label='Age']; 
-    x2 [label='BMI'];
-    x3 [label='Children'];
-    x4 [label='Sex'];
-    x5 [label='Smoker'];
-    x6 [label='Region'];
-    xlabel [shape=plaintext, label='Input Layer'];
-  }
-  
-  subgraph cluster_hidden {
-    color=none;
-    node [style=solid,color=black, shape=circle];
-    h1_1; h1_2; h1_3; h1_dots [shape=plaintext,label='...'];
-    h1_n;
-    h1label [shape=plaintext, label='Hidden Layer\n(5-15 neurons)'];
-  }
-  
-  subgraph cluster_output {
-    color=none;
-    node [style=solid,color=black, shape=circle];
-    out1 [label='Output'];
-    outlabel [shape=plaintext, label='Output Layer\n(Sigmoid)'];
-  }
-  
-  // Edges between nodes
-  {x1; x2; x3; x4; x5; x6} -> {h1_1; h1_2; h1_3; h1_n};
-  {h1_1; h1_2; h1_3; h1_n} -> out1;
-}
-")
-```
-
-For our neural network, we design a feedforward architecture with one hidden layer. This design can capture complex non-linear relationships in the data, including interactions between variables like smoking status and BMI.
-
-```{r nn-tuning}
-# Install and load nnet if not already installed
-if (!require("nnet")) install.packages("nnet")
-library(nnet)
+```{r nn-design, fig.cap="Neural Network Architecture (Untuned)"}
+set.seed(my_seed)
 
 # Prepare data for nnet (combine features and target)
 # Use the scaled data to match the preprocessing of the SVM model
@@ -690,6 +592,41 @@ X_valid_df <- as.data.frame(X_valid_scaled)
 
 train_nnet <- cbind(X_train_df, charges_numeric = ifelse(y_train == "high", 1, 0))
 valid_nnet <- cbind(X_valid_df, charges_numeric = ifelse(y_valid == "high", 1, 0))
+
+# Create a visual representation of the neural network architecture using arbitrary pre-tuned values
+viz_nn_model <- nnet(
+  charges_numeric ~ ., 
+  data = train_nnet, 
+  size = 10,  # Middle value from our tuning grid
+  decay = 0.01,
+  maxit = 500,
+  linout = FALSE,
+  trace = FALSE
+)
+
+# Create a named vector for input features
+feature_names <- colnames(X_train_scaled)
+
+# Plot the neural network with custom styling
+par(mar = c(0, 0, 2, 0))  # Adjust margins
+plotnet(
+  viz_nn_model,
+  pos_col = charge_colors[1],  # Positive weights
+  neg_col = charge_colors[2],  # Negative weights
+  bias = TRUE,                # Show bias terms
+  circle_cex = 3,             # Size of nodes
+  cex_val = 0.7,              # Text size
+  alpha_val = 0.7,            # Transparency
+  circle_col = "lightblue",   # Node color
+  custom_labels = c(feature_names, "", "High Charges"),
+  layer_label = TRUE,
+  main = "Neural Network Model Architecture"
+)
+```
+
+For our neural network, we design a feedforward architecture with one hidden layer. This design can capture complex non-linear relationships in the data, including interactions between variables like smoking status and BMI.
+
+```{r nn-tuning}
 
 # Set up grid for tuning
 nn_params <- expand.grid(
@@ -777,7 +714,10 @@ best_nn_params <- nn_results %>% dplyr::arrange(desc(f1)) %>% head(1)
 
 # Display tuning results
 kableExtra::kbl(
-  nn_results %>% dplyr::arrange(desc(f1)) %>% dplyr::select(-accuracy),
+  nn_results %>% 
+    dplyr::arrange(desc(f1)) %>% 
+    dplyr::select(-accuracy) %>% 
+    dplyr::top_n(5),
   caption = "Neural Network Hyperparameter Tuning Results",
   format = "latex",
   booktabs = TRUE,
@@ -795,6 +735,7 @@ kableExtra::kbl(
 ```{r nn-final}
 # Build final model with best parameters
 set.seed(my_seed)
+
 final_nn_model <- nnet(
   charges_numeric ~ ., 
   data = train_nnet, 
@@ -810,8 +751,6 @@ nn_pred_prob <- predict(final_nn_model, newdata = valid_nnet[, -ncol(valid_nnet)
 nn_pred <- ifelse(nn_pred_prob > 0.5, "high", "low")
 nn_pred <- factor(nn_pred, levels = c("low", "high"))
 
-# For compatibility with later sections, create a y_valid_keras equivalent
-y_valid_keras <- as.numeric(y_valid == "high")
 ```
 
 ```{r nn-performance-plot, fig.cap="Neural Network Classification Performance", fig.width=10, fig.height=4}
@@ -860,8 +799,7 @@ Our neural network architecture consists of:
 
 1. **Input Layer**: `r ncol(X_train_scaled)` neurons (matching our feature dimensionality)
 
-2. **Hidden Layer**: 
-   - `r best_nn_params$size` neurons with sigmoid activation
+2. **Hidden Layer**: `r best_nn_params$size` neurons with sigmoid activation
    
    **Justification**: This structure allows the model to learn non-linear patterns in the data. The optimal number of neurons was determined through cross-validation to balance between underfitting and overfitting.
 
@@ -879,7 +817,7 @@ The performance visualization shows how the model's predictions are distributed 
 
 # Model Evaluation and Comparison {#sec-evaluation}
 
-To evaluate our models, we'll use a comprehensive set of metrics including accuracy, precision, recall, F1 score, and ROC AUC. Since we're particularly interested in correctly identifying "high" charge cases, we'll prioritize the F1 score, which balances precision and recall.
+To evaluate our models, we'll use the metrics accuracy, precision, recall, F1 score, and ROC AUC.
 
 ```{r model-evaluation}
 # Function to calculate all metrics
@@ -928,20 +866,20 @@ nn_metrics <- calculate_metrics(y_valid, nn_pred, nn_pred_prob)
 metrics_table <- data.frame(
   Metric = c("Accuracy", "F1 Score", "Recall", "Precision", "AUROC", "AUPRC"),
   SVM = c(
-    svm_metrics$accuracy,
-    svm_metrics$f1,
-    svm_metrics$recall,
-    svm_metrics$precision,
-    svm_metrics$auroc,
-    svm_metrics$auprc
+    paste0(round(svm_metrics$accuracy * 100, 1), "%"),
+    paste0(round(svm_metrics$f1 * 100, 1), "%"),
+    paste0(round(svm_metrics$recall * 100, 1), "%"),
+    paste0(round(svm_metrics$precision * 100, 1), "%"),
+    round(svm_metrics$auroc, 3),
+    round(svm_metrics$auprc, 3)
   ),
   NN = c(
-    nn_metrics$accuracy,
-    nn_metrics$f1,
-    nn_metrics$recall,
-    nn_metrics$precision,
-    nn_metrics$auroc,
-    nn_metrics$auprc
+    paste0(round(nn_metrics$accuracy * 100, 1), "%"),
+    paste0(round(nn_metrics$f1 * 100, 1), "%"),
+    paste0(round(nn_metrics$recall * 100, 1), "%"),
+    paste0(round(nn_metrics$precision * 100, 1), "%"),
+    round(nn_metrics$auroc, 3),
+    round(nn_metrics$auprc, 3)
   )
 )
 
@@ -949,30 +887,53 @@ metrics_table <- data.frame(
 better_model <- ifelse(svm_metrics$f1 > nn_metrics$f1, "SVM", "Neural Network")
 better_f1 <- max(svm_metrics$f1, nn_metrics$f1)
 
+# Create numeric versions for row highlighting
+numeric_metrics <- data.frame(
+  SVM = c(
+    svm_metrics$accuracy * 100,
+    svm_metrics$f1 * 100,
+    svm_metrics$recall * 100,
+    svm_metrics$precision * 100,
+    svm_metrics$auroc,
+    svm_metrics$auprc
+  ),
+  NN = c(
+    nn_metrics$accuracy * 100,
+    nn_metrics$f1 * 100,
+    nn_metrics$recall * 100,
+    nn_metrics$precision * 100,
+    nn_metrics$auroc,
+    nn_metrics$auprc
+  )
+)
+
 kableExtra::kbl(
   metrics_table,
   caption = "Model Performance Comparison",
   format = "latex",
   booktabs = TRUE,
   align = "c",
-  digits = 3
+  col.names = c("Metric", "SVM", "Neural Network")
 ) %>%
   kableExtra::kable_styling(
-    latex_options = c("HOLD_position"),
+    latex_options = c("HOLD_position", "scale_down"),  # Add scale_down
     font_size = 9,
-    position = "center"
+    position = "center",
+    full_width = FALSE
   ) %>%
-  kableExtra::row_spec(which(metrics_table$SVM > metrics_table$NN), 
-                     bold = TRUE, 
-                     color = "black", 
+  kableExtra::row_spec(which(numeric_metrics$SVM > numeric_metrics$NN), 
                      background = "#E1F5FE") %>%
-  kableExtra::row_spec(which(metrics_table$NN > metrics_table$SVM), 
-                     bold = TRUE, 
-                     color = "black", 
-                     background = "#E8F5E9")
+  kableExtra::row_spec(which(numeric_metrics$NN > numeric_metrics$SVM), 
+                     background = "#E8F5E9") %>%
+  kableExtra::footnote(
+    general = "Color key: Blue = SVM performs better; Green = Neural Network performs better.",
+    general_title = "Note: ",
+    threeparttable = TRUE,  # This ensures footnotes stay within table width
+    footnote_as_chunk = TRUE
+  )
 ```
 
-```{r roc-curves, fig.cap="ROC Curves Comparison", fig.width=8, fig.height=5}
+```{r roc-curves, fig.cap="ROC Curves Comparison", fig.width=9, fig.height=7}
 # Create ROC curves for visual comparison
 roc_svm <- pROC::roc(ifelse(y_valid == "high", 1, 0), svm_pred_prob, quiet = TRUE)
 roc_nn <- pROC::roc(ifelse(y_valid == "high", 1, 0), nn_pred_prob, quiet = TRUE)
@@ -994,16 +955,16 @@ ggplot2::ggplot() +
     y = "True Positive Rate (Sensitivity)",
     title = "ROC Curves Comparison"
   ) +
-  ggplot2::scale_color_manual(values = c("SVM" = "#E41A1C", "Neural Network" = "#377EB8")) +
+  ggplot2::scale_color_manual(values = c("SVM" = charge_colors[1], "Neural Network" = charge_colors[2])) +
   ggplot2::coord_equal() +
   ggplot2::theme(legend.title = ggplot2::element_blank()) +
   my_theme +
-  ggplot2::annotate("text", x = 0.75, y = 0.25, 
+  ggplot2::annotate("text", x = 0.5, y = 0.25, 
            label = paste("SVM AUC:", round(svm_metrics$auroc, 3)), 
-           color = "#E41A1C", hjust = 0) +
-  ggplot2::annotate("text", x = 0.75, y = 0.2, 
+           color = charge_colors[1], hjust = 0) +
+  ggplot2::annotate("text", x = 0.5, y = 0.2, 
            label = paste("NN AUC:", round(nn_metrics$auroc, 3)), 
-           color = "#377EB8", hjust = 0)
+           color = charge_colors[2], hjust = 0)
 ```
 
 ```{r confusion-matrices, fig.cap="Confusion Matrices", fig.width=8, fig.height=4}
@@ -1025,13 +986,13 @@ plot_confusion_matrix <- function(conf_matrix, title) {
     ggplot2::geom_text(ggplot2::aes(label = Label), fontface = "bold") +
     ggplot2::theme_minimal() +
     ggplot2::labs(title = title) +
-    ggplot2::scale_fill_manual(values = c("TRUE" = "#4CAF50", "FALSE" = "#FF5722")) +
+    ggplot2::scale_fill_manual(values = c("TRUE" = charge_colors[1], "FALSE" = charge_colors[2])) +
     ggplot2::theme(legend.position = "none",
                  panel.grid = ggplot2::element_blank()) +
     my_theme
 }
 
-# Create confusion matrices
+# Plot confusion matrices
 p1 <- plot_confusion_matrix(svm_metrics$confusion, "SVM Confusion Matrix")
 p2 <- plot_confusion_matrix(nn_metrics$confusion, "Neural Network Confusion Matrix")
 
@@ -1040,24 +1001,84 @@ gridExtra::grid.arrange(p1, p2, ncol = 2)
 ```
 
 ## Model Performance Comparison {#sec-performance-comparison}
+```{r model-comparison}
+# Create comparison table
+model_comparison <- data.frame(
+  Metric = c("Accuracy", "F1 Score", "Recall", "Precision", "AUROC", "AUPRC"),
+  SVM = c(
+    paste0(round(svm_metrics$accuracy * 100, 1), "%"),
+    paste0(round(svm_metrics$f1 * 100, 1), "%"),
+    paste0(round(svm_metrics$recall * 100, 1), "%"),
+    paste0(round(svm_metrics$precision * 100, 1), "%"),
+    round(svm_metrics$auroc, 3),
+    round(svm_metrics$auprc, 3)
+  ),
+  NN = c(
+    paste0(round(nn_metrics$accuracy * 100, 1), "%"),
+    paste0(round(nn_metrics$f1 * 100, 1), "%"),
+    paste0(round(nn_metrics$recall * 100, 1), "%"),
+    paste0(round(nn_metrics$precision * 100, 1), "%"),
+    round(nn_metrics$auroc, 3),
+    round(nn_metrics$auprc, 3)
+  ),
+  Description = c(
+    "",
+    "for the \"high\" class",
+    "(correctly identifying \"high\" cases)",
+    "(accuracy of \"high\" predictions)",
+    "",
+    ""
+  )
+)
 
-The evaluation metrics reveal interesting differences between our two models:
+# Create numeric comparison table for highlighting
+numeric_comparison <- data.frame(
+  SVM = c(
+    svm_metrics$accuracy,
+    svm_metrics$f1,
+    svm_metrics$recall,
+    svm_metrics$precision,
+    svm_metrics$auroc,
+    svm_metrics$auprc
+  ),
+  NN = c(
+    nn_metrics$accuracy,
+    nn_metrics$f1,
+    nn_metrics$recall,
+    nn_metrics$precision,
+    nn_metrics$auroc,
+    nn_metrics$auprc
+  )
+)
 
-### SVM Model Performance
-- **Accuracy**: `r round(svm_metrics$accuracy * 100, 1)`%
-- **F1 Score**: `r round(svm_metrics$f1 * 100, 1)`% for the "high" class
-- **Recall**: `r round(svm_metrics$recall * 100, 1)`% (correctly identifying "high" cases)
-- **Precision**: `r round(svm_metrics$precision * 100, 1)`% (accuracy of "high" predictions)
-- **AUROC**: `r round(svm_metrics$auroc, 3)`
-- **AUPRC**: `r round(svm_metrics$auprc, 3)`
-
-### Neural Network Performance
-- **Accuracy**: `r round(nn_metrics$accuracy * 100, 1)`%
-- **F1 Score**: `r round(nn_metrics$f1 * 100, 1)`% for the "high" class
-- **Recall**: `r round(nn_metrics$recall * 100, 1)`% (correctly identifying "high" cases)
-- **Precision**: `r round(nn_metrics$precision * 100, 1)`% (accuracy of "high" predictions)
-- **AUROC**: `r round(nn_metrics$auroc, 3)`
-- **AUPRC**: `r round(nn_metrics$auprc, 3)`
+# Create formatted table
+kableExtra::kbl(
+  model_comparison[, c("Metric", "SVM", "NN", "Description")],
+  caption = "Model Performance Comparison",
+  format = "latex",
+  booktabs = TRUE,
+  col.names = c("Metric", "SVM", "Neural Network", "Description"),
+  align = c("l", "c", "c", "l")
+) %>%
+  kableExtra::kable_styling(
+    latex_options = c("HOLD_position"),
+    font_size = 9,
+    position = "center"
+  ) %>%
+  kableExtra::row_spec(
+    which(numeric_comparison$SVM > numeric_comparison$NN), 
+    background = "#E1F5FE"
+  ) %>%
+  kableExtra::row_spec(
+    which(numeric_comparison$NN > numeric_comparison$SVM), 
+    background = "#E8F5E9"
+  ) %>%
+  kableExtra::footnote(
+    general = "Color key: Blue = SVM performs better; Green = Neural Network performs better.",
+    general_title = "Note: ",
+    threeparttable = TRUE
+  )
+```
 
 ### Key Observations
 
@@ -1073,13 +1094,11 @@ The evaluation metrics reveal interesting differences between our two models:
 
 # Feature Importance Analysis {#sec-feature-importance}
 
-To understand which factors most strongly influence our predictions, we analyze feature importance from both models.
-
 ## SVM Feature Importance {#sec-svm-importance}
 
 For SVM, we use permutation importance, which measures how much model performance decreases when each feature is randomly shuffled.
 
-```{r svm-importance, fig.cap="SVM Feature Importance", fig.height=5}
+```{r svm-importance}
 # Calculate permutation importance for SVM
 set.seed(my_seed)
 svm_importance <- function(model, X, y, n_repeats = 5) {
@@ -1127,22 +1146,13 @@ svm_importance <- function(model, X, y, n_repeats = 5) {
 # Calculate SVM importance
 svm_imp_df <- svm_importance(final_svm_model, X_valid_scaled, y_valid)
 
-# Plot SVM importance
-ggplot2::ggplot(svm_imp_df %>% dplyr::slice(1:10), 
-               ggplot2::aes(x = reorder(Feature, Importance), y = Importance)) +
-  ggplot2::geom_bar(stat = "identity", fill = charge_colors[1]) +
-  ggplot2::coord_flip() +
-  ggplot2::labs(title = "SVM Feature Importance (Top 10 Features)",
-               x = "Feature",
-               y = "Importance Score") +
-  my_theme
 ```
 
 ## Neural Network Feature Importance {#sec-nn-importance}
 
 For neural networks, we calculate permutation importance by measuring how much the model's performance decreases when each feature is permuted.
 
-```{r nn-importance, fig.cap="Neural Network Feature Importance", fig.height=5}
+```{r nn-importance}
 # Function to calculate permutation importance for neural network
 calculate_nnet_importance <- function(model, X, y, n_repeats = 5) {
   # Get baseline performance
@@ -1194,32 +1204,44 @@ nn_importance <- calculate_nnet_importance(final_nn_model,
                                           X_valid_df, 
                                           valid_nnet$charges_numeric)
 
-# Plot importance
-ggplot2::ggplot(nn_importance %>% dplyr::slice(1:10), 
-               ggplot2::aes(x = reorder(Feature, Importance), y = Importance)) +
-  ggplot2::geom_bar(stat = "identity", fill = charge_colors[2]) +
-  ggplot2::coord_flip() +
-  ggplot2::labs(title = "Neural Network Permutation Importance (Top 10 Features)",
-               x = "Feature",
-               y = "Importance (Performance Decrease)") +
-  my_theme
 ```
 
 ## Feature Importance Comparison {#sec-importance-comparison}
 
-Both models identify similar important features, with some key differences:
+```{r feature-importance-plots, fig.cap="Neural Network Feature Importance", fig.height=3}
+# Plot SVM importance
+svm_plot <- ggplot2::ggplot(svm_imp_df %>% dplyr::slice(1:10), 
+               ggplot2::aes(x = reorder(Feature, Importance), y = Importance)) +
+  ggplot2::geom_bar(stat = "identity", fill = charge_colors[1]) +
+  ggplot2::coord_flip() +
+  ggplot2::labs(title = "SVM Feature Importance",
+               x = "Feature",
+               y = "Importance Score") +
+  my_theme
 
-1. **Smoking Status**: Consistently ranks as a top predictor in both models, confirming our exploratory findings that smoking strongly influences insurance charges.
+# Plot NN importance
+nn_plot <- ggplot2::ggplot(nn_importance %>% dplyr::slice(1:10), 
+               ggplot2::aes(x = reorder(Feature, Importance), y = Importance)) +
+  ggplot2::geom_bar(stat = "identity", fill = charge_colors[2]) +
+  ggplot2::coord_flip() +
+  ggplot2::labs(title = "NN Permutation Importance",
+               x = "Feature",
+               y = "Importance (Performance Decrease)") +
+  my_theme
 
-2. **Age**: Both models identify age as a significant factor, with the neural network giving it slightly more importance than the SVM model.
+plots <- grid.arrange(svm_plot, nn_plot, ncol = 2, 
+                     top = "Feature Importance Comparison: SVM vs Neural Network")
+```
 
-3. **BMI**: Shows moderate importance in both models, particularly for the neural network, which may better capture its non-linear relationship with charges.
+1. **Age**: Both models identify age as a significant factor, with the neural network giving it slightly more importance than the SVM model.
 
-4. **Region**: The southwest region appears to have distinct importance in both models, suggesting geographical variations in insurance charges.
+2. **Smoking Status**: Consistently ranks as a top predictor in both models, confirming our exploratory findings that smoking strongly influences insurance charges.
 
-5. **Children**: Shows lower importance compared to other factors, but is still relevant to the classification task.
+5. **Children**: Shows much lower importance compared to top 2 factors, but is still relevant to the classification task.
 
-The agreement between both models on key predictors increases our confidence in these findings. The importance rankings align well with our exploratory data analysis, which showed strong associations between smoking status, age, BMI, and insurance charges.
+3. **BMI, Region and sex**: Shows moderate, varying degrees of importance in both models.
+
+The agreement between both models on key predictors increases our confidence in these findings. The importance rankings align well with our exploratory data analysis, which showed strong associations between smoking status, age and insurance charges.
 
 # Prediction on Test Data {#sec-prediction}
 
@@ -1233,10 +1255,9 @@ selected_accuracy <- ifelse(selected_model == "SVM", svm_metrics$accuracy, nn_me
 
 # Create a selection justification table
 model_selection <- data.frame(
-  "Selected Model" = selected_model,
-  "F1 Score" = selected_f1,
-  "Accuracy" = selected_accuracy,
-  "Justification" = paste("The", selected_model, "model achieves the highest F1 score, providing the best balance between precision and recall for identifying high-cost insurance cases.")
+  "Selected_Model" = selected_model,
+  "F1_Score" = round(selected_f1, 3),
+  "Accuracy" = round(selected_accuracy, 3)
 )
 
 # Display selection table
@@ -1246,15 +1267,20 @@ kableExtra::kbl(
   format = "latex",
   booktabs = TRUE,
   align = "c",
-  col.names = c("Selected Model", "F1 Score", "Accuracy", "Justification")
+  col.names = c("Selected Model", "F1 Score", "Accuracy"),
+  row.names = FALSE
 ) %>%
   kableExtra::kable_styling(
-    latex_options = c("HOLD_position"),
+    latex_options = c("HOLD_position", "striped"),
     font_size = 9,
-    position = "center"
+    position = "center",
+    full_width = TRUE
   ) %>%
-  kableExtra::column_spec(4, width = "3in")
+  kableExtra::column_spec(4, width = "8cm") %>%
+  kableExtra::row_spec(0, bold = TRUE)
 ```
+
+The `r selected_model` model achieves the highest F1 score, providing the best balance between precision and recall for identifying high-cost insurance cases.
 
 ```{r test-predictions}
 # Convert test data to appropriate format
@@ -1291,22 +1317,6 @@ write.table(as.character(test_pred),
 pred_distribution <- table(test_pred)
 pred_percents <- prop.table(pred_distribution) * 100
 
-kableExtra::kbl(
-  data.frame(
-    Class = names(pred_distribution),
-    Count = as.numeric(pred_distribution),
-    Percentage = paste0(round(pred_percents, 1), "%")
-  ),
-  caption = "Test Data Prediction Distribution",
-  format = "latex",
-  booktabs = TRUE,
-  align = "c"
-) %>%
-  kableExtra::kable_styling(
-    latex_options = c("HOLD_position"),
-    font_size = 9,
-    position = "center"
-  )
 ```
 
 ```{r prediction-visualization, fig.cap="Predicted Probabilities by Age and Smoking Status", fig.width=8, fig.height=5}
@@ -1325,7 +1335,7 @@ ggplot2::ggplot(pred_data, ggplot2::aes(x = age, y = probability, color = smoker
   ggplot2::geom_point(alpha = 0.7, size = 3) +
   ggplot2::geom_hline(yintercept = 0.5, linetype = "dashed", color = "gray50") +
   ggplot2::facet_wrap(~ region) +
-  ggplot2::scale_color_manual(values = c("no" = "#5ab4ac", "yes" = "#d8b365")) +
+  ggplot2::scale_color_manual(values = c("no" = charge_colors[2], "yes" = charge_colors[1])) +
   ggplot2::labs(
     title = paste("Predicted Probabilities on External Test Data using", selected_model),
     subtitle = paste("Classification Threshold = 0.5, High Charges = ", round(pred_percents["high"], 1), "%, Low Charges = ", round(pred_percents["low"], 1), "%", sep=""),
@@ -1337,9 +1347,7 @@ ggplot2::ggplot(pred_data, ggplot2::aes(x = age, y = probability, color = smoker
   my_theme
 ```
 
-We successfully generated predictions for all `r nrow(test_data)` observations in the test dataset. The predictions have been saved to "TBSCES001.csv" according to the required format, with `r round(pred_percents["high"], 1)`% classified as "high" charges and `r round(pred_percents["low"], 1)`% as "low" charges.
-
-The visualization of predicted probabilities reveals clear patterns:
+The visualization of predicted probabilities reveals:
 
 1. **Smoking Status**: Strong separation between smokers and non-smokers, with smokers consistently receiving higher probabilities of "high" charges
 
@@ -1353,29 +1361,13 @@ These patterns align with our feature importance analysis and exploratory findin
 
 # Conclusion {#sec-conclusion}
 
-This analysis has successfully developed and evaluated advanced machine learning models for predicting high versus low medical insurance costs based on patient characteristics. Here are the key findings:
+This analysis has developed and evaluated SVM and Neural Network models for predicting high versus low medical insurance costs based on patient characteristics.
 
 1. **Model Performance**:
    - The `r selected_model` model achieved the best F1 score of `r round(selected_f1, 3)` for predicting high insurance charges
    - Both models showed strong discriminative ability with AUROC values above 0.85
-   - The selected model demonstrates a good balance between precision and recall, making it suitable for identifying high-cost cases
 
-2. **Key Predictors**:
-   - **Smoking status** emerged as the dominant factor influencing insurance charges, with `r round(smoker_high_pct, 1)`% of smokers having high charges compared to only `r round(nonsmoker_high_pct, 1)`% of non-smokers
-   - **Age** demonstrated a consistent positive relationship with high charges
-   - **BMI** showed a significant association with charges, particularly for smokers
-   - The interaction between smoking and BMI is particularly important, with the effect of BMI being much stronger for smokers
-
-3. **Practical Implications**:
+2. **Practical Implications**:
    - **For Individuals**: Smoking cessation and weight management present the most significant opportunities for reducing insurance costs
    - **For Insurers**: Risk assessment models should incorporate these key factors and their interactions for more accurate premium setting
    - **For Policymakers**: Public health initiatives targeting smoking and obesity could have substantial impacts on healthcare costs
-
-4. **Methodological Insights**:
-   - Both SVM and neural network approaches effectively captured complex non-linear relationships and interactions
-   - The `r selected_model` model demonstrated slightly better performance, likely due to its ability to `r ifelse(selected_model == "SVM", "find optimal decision boundaries with kernel methods", "learn hierarchical feature representations through multiple layers")`
-   - Proper regularization and hyperparameter tuning were crucial for achieving optimal performance
-
-The clear relationship between modifiable risk factors (especially smoking and BMI) and insurance costs suggests that targeted interventions could significantly reduce healthcare expenses while improving public health outcomes.
-
-In future work, incorporating additional features such as medical history, lifestyle factors, and more detailed regional information could further improve predictive accuracy. Longitudinal studies would also help assess how changes in risk factors affect insurance costs over time.
